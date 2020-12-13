@@ -27,7 +27,7 @@ package io.airbyte.integrations.source.jdbc;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.airbyte.integrations.base.IntegrationRunner;
 import io.airbyte.integrations.base.Source;
-import org.jooq.SQLDialect;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,13 +36,18 @@ public class JdbcSource extends AbstractJdbcSource implements Source {
   private static final Logger LOGGER = LoggerFactory.getLogger(JdbcSource.class);
 
   public JdbcSource() {
-    super("org.postgresql.Driver", SQLDialect.POSTGRES);
+    super("org.postgresql.Driver");
   }
 
   // no-op for JdbcSource since the config it receives is designed to be use for JDBC.
   @Override
   public JsonNode toJdbcConfig(JsonNode config) {
     return config;
+  }
+
+  @Override
+  public Set<String> getExcludedInternalSchemas() {
+    return Set.of("information_schema", "pg_catalog", "pg_internal", "catalog_history");
   }
 
   public static void main(String[] args) throws Exception {

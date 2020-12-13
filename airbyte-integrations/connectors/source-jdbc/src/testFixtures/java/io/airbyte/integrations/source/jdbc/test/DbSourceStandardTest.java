@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-package io.airbyte.integrations.source.jdbc;
+package io.airbyte.integrations.source.jdbc.test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -37,9 +37,9 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import io.airbyte.commons.json.Jsons;
 import io.airbyte.commons.resources.MoreResources;
-import io.airbyte.db.Database;
 import io.airbyte.db.Databases;
-import io.airbyte.integrations.base.Source;
+import io.airbyte.db.JdbcDatabase;
+import io.airbyte.integrations.source.jdbc.AbstractJdbcSource;
 import io.airbyte.integrations.source.jdbc.models.JdbcState;
 import io.airbyte.integrations.source.jdbc.models.JdbcStreamState;
 import io.airbyte.protocol.models.AirbyteCatalog;
@@ -60,73 +60,84 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.testcontainers.containers.PostgreSQLContainer;
 
-class JooqSourceTest {
+/**
+ * Tests that should be run on all Sources that extend the AbstractJdbcSource.
+ */
+// How leverage these tests:
+// 1. Extend this class in the test module of the Source.
+// 2. From the class that extends this one, you MUST call super.setup() in a @BeforeEach method.
+// Otherwise you'll see many NPE issues. Your before each should also handle providing a fresh
+// database between each test.
+// 3. From the class that extends this one, implement a @AfterEach that cleans out the database
+// between each test.
+// 4. Then implement the abstract methods documented below.
+public abstract class DbSourceStandardTest {
 
-  private static final String STREAM_NAME = "public.id_and_name";
-  private static final AirbyteCatalog CATALOG = new AirbyteCatalog().withStreams(Lists.newArrayList(CatalogHelpers.createAirbyteStream(
-      STREAM_NAME,
-      Field.of("id", JsonSchemaPrimitive.NUMBER),
-      Field.of("name", JsonSchemaPrimitive.STRING),
-      Field.of("updated_at", JsonSchemaPrimitive.STRING))
-      .withSupportedSyncModes(Lists.newArrayList(SyncMode.FULL_REFRESH, SyncMode.INCREMENTAL))));
-  private static final ConfiguredAirbyteCatalog CONFIGURED_CATALOG = CatalogHelpers.toDefaultConfiguredCatalog(CATALOG);
-  private static final List<AirbyteMessage> MESSAGES = Lists.newArrayList(
-      new AirbyteMessage().withType(Type.RECORD)
-          .withRecord(new AirbyteRecordMessage().withStream(STREAM_NAME)
-              .withData(Jsons.jsonNode(ImmutableMap.of("id", 1, "name", "picard", "updated_at", "2004-10-19")))),
-      new AirbyteMessage().withType(Type.RECORD)
-          .withRecord(new AirbyteRecordMessage().withStream(STREAM_NAME)
-              .withData(Jsons.jsonNode(ImmutableMap.of("id", 2, "name", "crusher", "updated_at", "2005-10-19")))),
-      new AirbyteMessage().withType(Type.RECORD)
-          .withRecord(new AirbyteRecordMessage().withStream(STREAM_NAME)
-              .withData(Jsons.jsonNode(ImmutableMap.of("id", 3, "name", "vash", "updated_at", "2006-10-19")))));
+  private static final String TABLE_NAME = "id_and_name";
 
   private JsonNode config;
+  private JdbcDatabase database;
+  private AbstractJdbcSource source;
+  private static String streamName;
 
-  private PostgreSQLContainer<?> container;
-  private Database database;
-  private Source source;
+  /**
+   * These tests write records without specifying a namespace (schema name). They will be written into
+   * whatever the default schema is for the database. When they are discovered they will be namespaced
+   * by the schema name (e.g. <default-schema-name>.<table_name>). Thus the source needs to tell the
+   * tests what that default schema name is. If the database does not support schemas, then database
+   * name should used instead.
+   *
+   * @return name that will be used to namespace the record.
+   */
+  public abstract Optional<String> getDefaultSchemaName();
 
-  @BeforeEach
-  void setup() throws Exception {
-    source = new PostgresJooqTestSource();
-    container = new PostgreSQLContainer<>("postgres:13-alpine");
-    container.start();
+  /**
+   * A valid configuration to connect to a test database.
+   *
+   * @return config
+   */
+  public abstract JsonNode getConfig();
 
-    config = Jsons.jsonNode(ImmutableMap.builder()
-        .put("username", container.getUsername())
-        .put("password", container.getPassword())
-        .put("jdbc_url", String.format("jdbc:postgresql://%s:%s/%s",
-            container.getHost(),
-            container.getFirstMappedPort(),
-            container.getDatabaseName()))
-        .build());
+  /**
+   * Full qualified class name of the JDBC driver for the database.
+   *
+   * @return driver
+   */
+  public abstract String getDriverClass();
 
-    database = Databases.createPostgresDatabase(
-        config.get("username").asText(),
-        config.get("password").asText(),
-        config.get("jdbc_url").asText());
+  /**
+   * An instance of the source that should be tests.
+   *
+   * @return source
+   */
+  public abstract AbstractJdbcSource getSource();
+
+  public void setup() throws Exception {
+    source = getSource();
+    streamName = getDefaultSchemaName().map(val -> val + "." + TABLE_NAME).orElse(TABLE_NAME);
+    config = getConfig();
+
+    // todo fix this.
+    final JsonNode jdbcConfig = source.toJdbcConfig(config);
+    database = Databases.createJdbcDatabase(
+        jdbcConfig.get("username").asText(),
+        jdbcConfig.has("password") ? jdbcConfig.get("password").asText() : null,
+        jdbcConfig.get("jdbc_url").asText(),
+        getDriverClass());
 
     database.query(ctx -> {
       // todo (cgardens) - jooq has inconsistent behavior in how it picks the current timezone across mac
       // and the CI. it does not in the DSL allow us to set a timezone. this may be the last straw for
       // jooq, because it means we can't fully abstract over it it with this source.
-      ctx.fetch("CREATE TABLE id_and_name(id INTEGER, name VARCHAR(200), updated_at DATE);");
-      ctx.fetch(
+      final String timestampKeyword = getDriverClass().equals("com.microsoft.sqlserver.jdbc.SQLServerDriver") ? "DATETIME2" : "DATETIME";
+
+      ctx.createStatement().execute(String.format("CREATE TABLE id_and_name(id INTEGER, name VARCHAR(200), updated_at DATE);"));
+      ctx.createStatement().execute(
           "INSERT INTO id_and_name (id, name, updated_at) VALUES (1,'picard', '2004-10-19'),  (2, 'crusher', '2005-10-19'), (3, 'vash', '2006-10-19');");
       return null;
     });
-  }
-
-  @AfterEach
-  void tearDown() throws Exception {
-    database.close();
-    container.close();
   }
 
   @Test
@@ -157,7 +168,7 @@ class JooqSourceTest {
   @Test
   void testDiscover() throws Exception {
     final AirbyteCatalog actual = source.discover(config);
-    assertEquals(CATALOG, actual);
+    assertEquals(getCatalog(), actual);
   }
 
   @Test
@@ -170,12 +181,12 @@ class JooqSourceTest {
       }
     });
 
-    assertEquals(MESSAGES, actualMessages);
+    assertEquals(getTestMessages(), actualMessages);
   }
 
   @Test
   void testReadOneColumn() throws Exception {
-    final ConfiguredAirbyteCatalog catalog = CatalogHelpers.createConfiguredAirbyteCatalog(STREAM_NAME, Field.of("id", JsonSchemaPrimitive.NUMBER));
+    final ConfiguredAirbyteCatalog catalog = CatalogHelpers.createConfiguredAirbyteCatalog(streamName, Field.of("id", JsonSchemaPrimitive.NUMBER));
 
     final List<AirbyteMessage> actualMessages = source.read(config, catalog, null).collect(Collectors.toList());
 
@@ -185,7 +196,7 @@ class JooqSourceTest {
       }
     });
 
-    final List<AirbyteMessage> expectedMessages = MESSAGES.stream()
+    final List<AirbyteMessage> expectedMessages = getTestMessages().stream()
         .map(Jsons::clone)
         .peek(m -> {
           ((ObjectNode) m.getRecord().getData()).remove("name");
@@ -197,10 +208,10 @@ class JooqSourceTest {
 
   @Test
   void testReadMultipleTables() throws Exception {
-    final String streamName2 = STREAM_NAME + 2;
+    final String streamName2 = streamName + 2;
     database.query(ctx -> {
-      ctx.fetch("CREATE TABLE id_and_name2(id INTEGER, name VARCHAR(200));");
-      ctx.fetch("INSERT INTO id_and_name2 (id, name) VALUES (1,'picard'),  (2, 'crusher'), (3, 'vash');");
+      ctx.createStatement().execute("CREATE TABLE id_and_name2(id INTEGER, name VARCHAR(200));");
+      ctx.createStatement().execute("INSERT INTO id_and_name2 (id, name) VALUES (1,'picard'),  (2, 'crusher'), (3, 'vash');");
 
       return null;
     });
@@ -219,7 +230,7 @@ class JooqSourceTest {
       }
     });
 
-    final List<AirbyteMessage> secondStreamExpectedMessages = MESSAGES
+    final List<AirbyteMessage> secondStreamExpectedMessages = getTestMessages()
         .stream()
         .map(Jsons::clone)
         .peek(m -> {
@@ -227,7 +238,7 @@ class JooqSourceTest {
           ((ObjectNode) m.getRecord().getData()).remove("updated_at");
         })
         .collect(Collectors.toList());
-    final List<AirbyteMessage> expectedMessages = new ArrayList<>(MESSAGES);
+    final List<AirbyteMessage> expectedMessages = new ArrayList<>(getTestMessages());
     expectedMessages.addAll(secondStreamExpectedMessages);
 
     assertEquals(expectedMessages, actualMessages);
@@ -249,7 +260,7 @@ class JooqSourceTest {
         "id",
         null,
         "3",
-        Lists.newArrayList(MESSAGES));
+        Lists.newArrayList(getTestMessages()));
   }
 
   @Test
@@ -258,7 +269,7 @@ class JooqSourceTest {
         "id",
         "2",
         "3",
-        Lists.newArrayList(MESSAGES.get(2)));
+        Lists.newArrayList(getTestMessages().get(2)));
   }
 
   @Test
@@ -267,16 +278,16 @@ class JooqSourceTest {
         "name",
         "patent",
         "vash",
-        Lists.newArrayList(MESSAGES.get(0), MESSAGES.get(2)));
+        Lists.newArrayList(getTestMessages().get(0), getTestMessages().get(2)));
   }
 
   @Test
   void testIncrementalTimestampCheckCursor() throws Exception {
     incrementalCursorCheck(
         "updated_at",
-        "2005-10-18",
-        "2006-10-19",
-        Lists.newArrayList(MESSAGES.get(1), MESSAGES.get(2)));
+        "2005-10-18T00:00:00Z",
+        "2006-10-19T00:00:00Z",
+        Lists.newArrayList(getTestMessages().get(1), getTestMessages().get(2)));
   }
 
   @Test
@@ -289,7 +300,7 @@ class JooqSourceTest {
         // records to (incorrectly) be filtered out.
         "data",
         "vash",
-        Lists.newArrayList(MESSAGES));
+        Lists.newArrayList(getTestMessages()));
   }
 
   @Test
@@ -300,14 +311,14 @@ class JooqSourceTest {
       airbyteStream.setCursorField(Lists.newArrayList("id"));
     });
 
-    final JdbcState state = new JdbcState().withStreams(Lists.newArrayList(new JdbcStreamState().withStreamName(STREAM_NAME)));
+    final JdbcState state = new JdbcState().withStreams(Lists.newArrayList(new JdbcStreamState().withStreamName(streamName)));
     final List<AirbyteMessage> actualMessagesFirstSync = source.read(config, configuredCatalog, Jsons.jsonNode(state)).collect(Collectors.toList());
 
     final Optional<AirbyteMessage> stateAfterFirstSyncOptional = actualMessagesFirstSync.stream().filter(r -> r.getType() == Type.STATE).findFirst();
     assertTrue(stateAfterFirstSyncOptional.isPresent());
 
     database.query(ctx -> {
-      ctx.fetch(
+      ctx.createStatement().execute(
           "INSERT INTO id_and_name (id, name, updated_at) VALUES (4,'riker', '2006-10-19'),  (5, 'data', '2006-10-19');");
       return null;
     });
@@ -319,17 +330,17 @@ class JooqSourceTest {
     assertEquals(2, (int) actualMessagesSecondSync.stream().filter(r -> r.getType() == Type.RECORD).count());
     final List<AirbyteMessage> expectedMessages = new ArrayList<>();
     expectedMessages.add(new AirbyteMessage().withType(Type.RECORD)
-        .withRecord(new AirbyteRecordMessage().withStream(STREAM_NAME)
-            .withData(Jsons.jsonNode(ImmutableMap.of("id", 4, "name", "riker", "updated_at", "2006-10-19")))));
+        .withRecord(new AirbyteRecordMessage().withStream(streamName)
+            .withData(Jsons.jsonNode(ImmutableMap.of("id", 4, "name", "riker", "updated_at", "2006-10-19T00:00:00Z")))));
     expectedMessages.add(new AirbyteMessage().withType(Type.RECORD)
-        .withRecord(new AirbyteRecordMessage().withStream(STREAM_NAME)
-            .withData(Jsons.jsonNode(ImmutableMap.of("id", 5, "name", "data", "updated_at", "2006-10-19")))));
+        .withRecord(new AirbyteRecordMessage().withStream(streamName)
+            .withData(Jsons.jsonNode(ImmutableMap.of("id", 5, "name", "data", "updated_at", "2006-10-19T00:00:00Z")))));
     expectedMessages.add(new AirbyteMessage()
         .withType(Type.STATE)
         .withState(new AirbyteStateMessage()
             .withData(Jsons.jsonNode(new JdbcState()
                 .withStreams(Lists.newArrayList(new JdbcStreamState()
-                    .withStreamName(STREAM_NAME)
+                    .withStreamName(streamName)
                     .withCursorField(ImmutableList.of("id"))
                     .withCursor("5")))))));
 
@@ -344,10 +355,10 @@ class JooqSourceTest {
 
   @Test
   void testReadMultipleTablesIncrementally() throws Exception {
-    final String streamName2 = STREAM_NAME + 2;
+    final String streamName2 = streamName + 2;
     database.query(ctx -> {
-      ctx.fetch("CREATE TABLE id_and_name2(id INTEGER, name VARCHAR(200));");
-      ctx.fetch("INSERT INTO id_and_name2 (id, name) VALUES (1,'picard'),  (2, 'crusher'), (3, 'vash');");
+      ctx.createStatement().execute("CREATE TABLE id_and_name2(id INTEGER, name VARCHAR(200));");
+      ctx.createStatement().execute("INSERT INTO id_and_name2 (id, name) VALUES (1,'picard'),  (2, 'crusher'), (3, 'vash');");
       return null;
     });
 
@@ -361,7 +372,7 @@ class JooqSourceTest {
       airbyteStream.setCursorField(Lists.newArrayList("id"));
     });
 
-    final JdbcState state = new JdbcState().withStreams(Lists.newArrayList(new JdbcStreamState().withStreamName(STREAM_NAME)));
+    final JdbcState state = new JdbcState().withStreams(Lists.newArrayList(new JdbcStreamState().withStreamName(streamName)));
     final List<AirbyteMessage> actualMessagesFirstSync = source.read(config, configuredCatalog, Jsons.jsonNode(state)).collect(Collectors.toList());
 
     // get last state message.
@@ -372,7 +383,7 @@ class JooqSourceTest {
 
     // we know the second streams messages are the same as the first minus the updated at column. so we
     // cheat and generate the expected messages off of the first expected messages.
-    final List<AirbyteMessage> secondStreamExpectedMessages = MESSAGES
+    final List<AirbyteMessage> secondStreamExpectedMessages = getTestMessages()
         .stream()
         .map(Jsons::clone)
         .peek(m -> {
@@ -380,14 +391,14 @@ class JooqSourceTest {
           ((ObjectNode) m.getRecord().getData()).remove("updated_at");
         })
         .collect(Collectors.toList());
-    final List<AirbyteMessage> expectedMessagesFirstSync = new ArrayList<>(MESSAGES);
+    final List<AirbyteMessage> expectedMessagesFirstSync = new ArrayList<>(getTestMessages());
     expectedMessagesFirstSync.add(new AirbyteMessage()
         .withType(Type.STATE)
         .withState(new AirbyteStateMessage()
             .withData(Jsons.jsonNode(new JdbcState()
                 .withStreams(Lists.newArrayList(
                     new JdbcStreamState()
-                        .withStreamName(STREAM_NAME)
+                        .withStreamName(streamName)
                         .withCursorField(ImmutableList.of("id"))
                         .withCursor("3"),
                     new JdbcStreamState()
@@ -400,7 +411,7 @@ class JooqSourceTest {
             .withData(Jsons.jsonNode(new JdbcState()
                 .withStreams(Lists.newArrayList(
                     new JdbcStreamState()
-                        .withStreamName(STREAM_NAME)
+                        .withStreamName(streamName)
                         .withCursorField(ImmutableList.of("id"))
                         .withCursor("3"),
                     new JdbcStreamState()
@@ -441,7 +452,7 @@ class JooqSourceTest {
 
     final JdbcState state = new JdbcState()
         .withStreams(Lists.newArrayList(new JdbcStreamState()
-            .withStreamName(STREAM_NAME)
+            .withStreamName(streamName)
             .withCursorField(ImmutableList.of(initialCursorField))
             .withCursor(initialCursorValue)));
 
@@ -459,7 +470,7 @@ class JooqSourceTest {
         .withState(new AirbyteStateMessage()
             .withData(Jsons.jsonNode(new JdbcState()
                 .withStreams(Lists.newArrayList(new JdbcStreamState()
-                    .withStreamName(STREAM_NAME)
+                    .withStreamName(streamName)
                     .withCursorField(ImmutableList.of(cursorField))
                     .withCursor(endCursorValue)))))));
 
@@ -468,7 +479,29 @@ class JooqSourceTest {
 
   // get catalog and perform a defensive copy.
   private static ConfiguredAirbyteCatalog getConfiguredCatalog() {
-    return Jsons.clone(CONFIGURED_CATALOG);
+    return CatalogHelpers.toDefaultConfiguredCatalog(getCatalog());
+  }
+
+  private static AirbyteCatalog getCatalog() {
+    return new AirbyteCatalog().withStreams(Lists.newArrayList(CatalogHelpers.createAirbyteStream(
+        streamName,
+        Field.of("id", JsonSchemaPrimitive.NUMBER),
+        Field.of("name", JsonSchemaPrimitive.STRING),
+        Field.of("updated_at", JsonSchemaPrimitive.STRING))
+        .withSupportedSyncModes(Lists.newArrayList(SyncMode.FULL_REFRESH, SyncMode.INCREMENTAL))));
+  }
+
+  private static List<AirbyteMessage> getTestMessages() {
+    return Lists.newArrayList(
+        new AirbyteMessage().withType(Type.RECORD)
+            .withRecord(new AirbyteRecordMessage().withStream(streamName)
+                .withData(Jsons.jsonNode(ImmutableMap.of("id", 1, "name", "picard", "updated_at", "2004-10-19T00:00:00Z")))),
+        new AirbyteMessage().withType(Type.RECORD)
+            .withRecord(new AirbyteRecordMessage().withStream(streamName)
+                .withData(Jsons.jsonNode(ImmutableMap.of("id", 2, "name", "crusher", "updated_at", "2005-10-19T00:00:00Z")))),
+        new AirbyteMessage().withType(Type.RECORD)
+            .withRecord(new AirbyteRecordMessage().withStream(streamName)
+                .withData(Jsons.jsonNode(ImmutableMap.of("id", 3, "name", "vash", "updated_at", "2006-10-19T00:00:00Z")))));
   }
 
 }
