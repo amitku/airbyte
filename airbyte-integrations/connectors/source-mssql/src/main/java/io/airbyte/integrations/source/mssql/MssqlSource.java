@@ -58,7 +58,14 @@ public class MssqlSource extends AbstractJdbcSource implements Source {
 
   @Override
   public Set<String> getExcludedInternalSchemas() {
-    return Set.of("INFORMATION_SCHEMA", "sys", "spt_fallback_db", "spt_monitor", "spt_values", "spt_fallback_usg", "MSreplication_options",
+    return Set.of(
+        "INFORMATION_SCHEMA",
+        "sys",
+        "spt_fallback_db",
+        "spt_monitor",
+        "spt_values",
+        "spt_fallback_usg",
+        "MSreplication_options",
         "spt_fallback_dev");
   }
 

@@ -133,7 +133,8 @@ public abstract class AbstractJdbcSource implements Source {
 
   @Override
   public Stream<AirbyteMessage> read(JsonNode config, ConfiguredAirbyteCatalog catalog, JsonNode state) throws Exception {
-    final JdbcStateManager stateManager = new JdbcStateManager(state == null ? new JdbcState() : Jsons.object(state, JdbcState.class), catalog);
+    final JdbcStateManager stateManager =
+        new JdbcStateManager(state == null ? JdbcStateManager.emptyState() : Jsons.object(state, JdbcState.class), catalog);
     final Instant now = Instant.now();
 
     final JdbcDatabase database = createDatabase(config);
@@ -155,7 +156,7 @@ public abstract class AbstractJdbcSource implements Source {
       }
 
       final TableInfoInternal table = tableNameToTable.get(streamName);
-      final Stream<AirbyteMessage> stream = getAirbyteStreamReadStream(
+      final Stream<AirbyteMessage> stream = createReadStream(
           database,
           airbyteStream,
           table,
@@ -167,11 +168,11 @@ public abstract class AbstractJdbcSource implements Source {
   }
 
   // get the read stream for an airbyte stream. the naming is accurate if unfortunate.
-  private Stream<AirbyteMessage> getAirbyteStreamReadStream(JdbcDatabase database,
-                                                            ConfiguredAirbyteStream airbyteStream,
-                                                            TableInfoInternal table,
-                                                            JdbcStateManager stateManager,
-                                                            Instant now)
+  private Stream<AirbyteMessage> createReadStream(JdbcDatabase database,
+                                                  ConfiguredAirbyteStream airbyteStream,
+                                                  TableInfoInternal table,
+                                                  JdbcStateManager stateManager,
+                                                  Instant now)
       throws SQLException {
     final String streamName = airbyteStream.getStream().getName();
     final Set<String> selectedFieldsInCatalog = CatalogHelpers.getTopLevelFieldNames(airbyteStream);

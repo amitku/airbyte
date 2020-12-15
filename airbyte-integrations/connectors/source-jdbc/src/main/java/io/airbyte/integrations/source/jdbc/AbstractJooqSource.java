@@ -156,7 +156,8 @@ public abstract class AbstractJooqSource implements Source {
 
   @Override
   public Stream<AirbyteMessage> read(JsonNode config, ConfiguredAirbyteCatalog catalog, JsonNode state) throws Exception {
-    final JdbcStateManager stateManager = new JdbcStateManager(state == null ? new JdbcState() : Jsons.object(state, JdbcState.class), catalog);
+    final JdbcStateManager stateManager =
+        new JdbcStateManager(state == null ? JdbcStateManager.emptyState() : Jsons.object(state, JdbcState.class), catalog);
     final Instant now = Instant.now();
 
     final Database database = createDatabase(config);
