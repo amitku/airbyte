@@ -70,10 +70,7 @@ public class MssqlDbSourceStandardTest extends DbSourceStandardTest {
 
     final String dbName = "db_" + RandomStringUtils.randomAlphabetic(10).toLowerCase();
 
-    database.query(ctx -> {
-      ctx.createStatement().execute(String.format("CREATE DATABASE %s;", dbName));
-      return null;
-    });
+    database.execute(ctx -> ctx.createStatement().execute(String.format("CREATE DATABASE %s;", dbName)));
 
     config = Jsons.clone(configWithoutDbName);
     ((ObjectNode) config).put("database", dbName);

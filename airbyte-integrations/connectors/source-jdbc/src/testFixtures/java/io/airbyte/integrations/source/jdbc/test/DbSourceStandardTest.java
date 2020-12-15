@@ -127,16 +127,10 @@ public abstract class DbSourceStandardTest {
         jdbcConfig.get("jdbc_url").asText(),
         getDriverClass());
 
-    database.query(ctx -> {
-      // todo (cgardens) - jooq has inconsistent behavior in how it picks the current timezone across mac
-      // and the CI. it does not in the DSL allow us to set a timezone. this may be the last straw for
-      // jooq, because it means we can't fully abstract over it it with this source.
-      final String timestampKeyword = getDriverClass().equals("com.microsoft.sqlserver.jdbc.SQLServerDriver") ? "DATETIME2" : "DATETIME";
-
-      ctx.createStatement().execute(String.format("CREATE TABLE id_and_name(id INTEGER, name VARCHAR(200), updated_at DATE);"));
-      ctx.createStatement().execute(
+    database.execute(connection -> {
+      connection.createStatement().execute(String.format("CREATE TABLE id_and_name(id INTEGER, name VARCHAR(200), updated_at DATE);"));
+      connection.createStatement().execute(
           "INSERT INTO id_and_name (id, name, updated_at) VALUES (1,'picard', '2004-10-19'),  (2, 'crusher', '2005-10-19'), (3, 'vash', '2006-10-19');");
-      return null;
     });
   }
 
@@ -209,11 +203,9 @@ public abstract class DbSourceStandardTest {
   @Test
   void testReadMultipleTables() throws Exception {
     final String streamName2 = streamName + 2;
-    database.query(ctx -> {
-      ctx.createStatement().execute("CREATE TABLE id_and_name2(id INTEGER, name VARCHAR(200));");
-      ctx.createStatement().execute("INSERT INTO id_and_name2 (id, name) VALUES (1,'picard'),  (2, 'crusher'), (3, 'vash');");
-
-      return null;
+    database.execute(connection -> {
+      connection.createStatement().execute("CREATE TABLE id_and_name2(id INTEGER, name VARCHAR(200));");
+      connection.createStatement().execute("INSERT INTO id_and_name2 (id, name) VALUES (1,'picard'),  (2, 'crusher'), (3, 'vash');");
     });
 
     final ConfiguredAirbyteCatalog catalog = new ConfiguredAirbyteCatalog().withStreams(Lists.newArrayList(
@@ -317,11 +309,8 @@ public abstract class DbSourceStandardTest {
     final Optional<AirbyteMessage> stateAfterFirstSyncOptional = actualMessagesFirstSync.stream().filter(r -> r.getType() == Type.STATE).findFirst();
     assertTrue(stateAfterFirstSyncOptional.isPresent());
 
-    database.query(ctx -> {
-      ctx.createStatement().execute(
-          "INSERT INTO id_and_name (id, name, updated_at) VALUES (4,'riker', '2006-10-19'),  (5, 'data', '2006-10-19');");
-      return null;
-    });
+    database.execute(connection -> connection.createStatement()
+        .execute("INSERT INTO id_and_name (id, name, updated_at) VALUES (4,'riker', '2006-10-19'),  (5, 'data', '2006-10-19');"));
 
     final List<AirbyteMessage> actualMessagesSecondSync = source
         .read(config, configuredCatalog, stateAfterFirstSyncOptional.get().getState().getData())
@@ -356,10 +345,9 @@ public abstract class DbSourceStandardTest {
   @Test
   void testReadMultipleTablesIncrementally() throws Exception {
     final String streamName2 = streamName + 2;
-    database.query(ctx -> {
+    database.execute(ctx -> {
       ctx.createStatement().execute("CREATE TABLE id_and_name2(id INTEGER, name VARCHAR(200));");
       ctx.createStatement().execute("INSERT INTO id_and_name2 (id, name) VALUES (1,'picard'),  (2, 'crusher'), (3, 'vash');");
-      return null;
     });
 
     final ConfiguredAirbyteCatalog configuredCatalog = getConfiguredCatalog();
